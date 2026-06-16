@@ -1,0 +1,970 @@
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+
+// ─── Database (IndexedDB via simple wrapper) ───────────────────────────────
+const DB_NAME = "CafeDB";
+const DB_VERSION = 1;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains("orders")) {
+        const store = db.createObjectStore("orders", { keyPath: "id" });
+        store.createIndex("date", "date");
+        store.createIndex("paid", "paid");
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbGetAll() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("orders", "readonly");
+    const req = tx.objectStore("orders").getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbPut(order) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("orders", "readwrite");
+    const req = tx.objectStore("orders").put(order);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbDelete(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("orders", "readwrite");
+    const req = tx.objectStore("orders").delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbClear() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("orders", "readwrite");
+    const req = tx.objectStore("orders").clear();
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+const fmt = (n) => `${Number(n).toFixed(2)} د.م.`;
+const fmtDate = (iso) => new Date(iso).toLocaleDateString("ar-MA", { day: "2-digit", month: "2-digit", year: "numeric" });
+const fmtTime = (iso) => new Date(iso).toLocaleTimeString("ar-MA", { hour: "2-digit", minute: "2-digit" });
+const todayStr = () => new Date().toISOString().slice(0, 10);
+
+function isSameDay(iso, dayStr) {
+  return iso && iso.slice(0, 10) === dayStr;
+}
+
+function weekStart() {
+  const d = new Date();
+  d.setDate(d.getDate() - d.getDay());
+  return d.toISOString().slice(0, 10);
+}
+
+function monthStart() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function yearStart() {
+  return `${new Date().getFullYear()}-01-01`;
+}
+
+function genId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+// ─── Mini Bar Chart ───────────────────────────────────────────────────────
+function BarChart({ data, color = "#C8A97E" }) {
+  const max = Math.max(...data.map((d) => d.value), 1);
+  return (
+    <div className="flex items-end gap-1 h-20 w-full">
+      {data.map((d, i) => (
+        <div key={i} className="flex flex-col items-center flex-1 gap-0.5">
+          <div
+            className="w-full rounded-t-sm transition-all duration-500"
+            style={{ height: `${(d.value / max) * 72}px`, backgroundColor: color, minHeight: d.value > 0 ? 4 : 0 }}
+          />
+          <span className="text-[9px] opacity-50 truncate w-full text-center">{d.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Icons ────────────────────────────────────────────────────────────────
+const Icon = {
+  Home: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-6 h-6"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg>,
+  List: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-6 h-6"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>,
+  Calendar: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-6 h-6"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
+  Chart: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-6 h-6"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>,
+  Plus: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-7 h-7"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+  Search: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
+  Edit: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+  Trash: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4"><polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>,
+  Check: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-4 h-4"><polyline points="20,6 9,17 4,12"/></svg>,
+  X: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-4 h-4"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>,
+  Sun: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>,
+  Moon: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>,
+  Download: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7,10 12,15 17,10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>,
+  Upload: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17,8 12,3 7,8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
+  Coffee: () => <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-5 h-5"><path d="M17 8h1a4 4 0 010 8h-1"/><path d="M3 8h14v9a4 4 0 01-4 4H7a4 4 0 01-4-4V8z"/><line x1="6" y1="2" x2="6" y2="4"/><line x1="10" y1="2" x2="10" y2="4"/><line x1="14" y1="2" x2="14" y2="4"/></svg>,
+};
+
+// ─── Modal ────────────────────────────────────────────────────────────────
+function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = ""; };
+  }, []);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl overflow-hidden shadow-2xl modal-card animate-slideUp">
+        <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-current/10">
+          <h2 className="text-lg font-bold">{title}</h2>
+          <button onClick={onClose} className="p-2 rounded-xl opacity-60 hover:opacity-100 hover:bg-current/10 transition-all">
+            <Icon.X />
+          </button>
+        </div>
+        <div className="px-5 py-4 max-h-[80vh] overflow-y-auto">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Order Form ───────────────────────────────────────────────────────────
+function OrderForm({ initial, onSave, onClose }) {
+  const [name, setName] = useState(initial?.customerName || "");
+  const [desc, setDesc] = useState(initial?.description || "");
+  const [price, setPrice] = useState(initial?.price || "");
+  const nameRef = useRef(null);
+
+  useEffect(() => { nameRef.current?.focus(); }, []);
+
+  function handleSubmit() {
+    if (!name.trim() || !price) return;
+    onSave({ customerName: name.trim(), description: desc.trim(), price: parseFloat(price) });
+    onClose();
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="block text-sm font-semibold opacity-70 mb-1.5">اسم الزبون *</label>
+        <input
+          ref={nameRef}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="أدخل اسم الزبون"
+          className="input-field w-full"
+          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+        />
+      </div>
+      <div>
+        <label className="block text-sm font-semibold opacity-70 mb-1.5">تفاصيل الطلب</label>
+        <textarea
+          value={desc}
+          onChange={(e) => setDesc(e.target.value)}
+          placeholder="مثال: قهوة حليب + كرواسون"
+          rows={3}
+          className="input-field w-full resize-none"
+        />
+      </div>
+      <div>
+        <label className="block text-sm font-semibold opacity-70 mb-1.5">المبلغ الإجمالي (د.م.) *</label>
+        <input
+          type="number"
+          value={price}
+          onChange={(e) => setPrice(e.target.value)}
+          placeholder="0.00"
+          min="0"
+          step="0.5"
+          className="input-field w-full"
+          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
+        />
+      </div>
+      <button
+        onClick={handleSubmit}
+        disabled={!name.trim() || !price}
+        className="btn-primary w-full py-3.5 rounded-2xl text-base font-bold mt-2 disabled:opacity-40"
+      >
+        {initial ? "حفظ التعديلات" : "✓ إضافة الطلب"}
+      </button>
+    </div>
+  );
+}
+
+// ─── Order Card ───────────────────────────────────────────────────────────
+function OrderCard({ order, onEdit, onDelete, onTogglePaid, dark }) {
+  return (
+    <div className={`order-card rounded-2xl p-4 mb-3 ${order.paid ? "paid-card" : "unpaid-card"}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <span className={`inline-flex items-center gap-1 text-xs font-bold px-2.5 py-0.5 rounded-full ${order.paid ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"}`}>
+              {order.paid ? <><Icon.Check /> مدفوع</> : "⏳ غير مدفوع"}
+            </span>
+          </div>
+          <p className="font-bold text-base truncate">{order.customerName}</p>
+          {order.description && (
+            <p className="text-sm opacity-60 mt-0.5 line-clamp-2">{order.description}</p>
+          )}
+          <div className="flex items-center gap-3 mt-2">
+            <span className="text-xl font-black text-amber-400">{fmt(order.price)}</span>
+            <span className="text-xs opacity-40">{fmtDate(order.date)} • {fmtTime(order.date)}</span>
+          </div>
+        </div>
+        <div className="flex flex-col gap-1.5 shrink-0">
+          <button onClick={() => onTogglePaid(order)} className={`action-btn ${order.paid ? "btn-unpay" : "btn-pay"}`}>
+            {order.paid ? <Icon.X /> : <Icon.Check />}
+          </button>
+          <button onClick={() => onEdit(order)} className="action-btn btn-edit">
+            <Icon.Edit />
+          </button>
+          <button onClick={() => onDelete(order)} className="action-btn btn-del">
+            <Icon.Trash />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Confirm Dialog ───────────────────────────────────────────────────────
+function ConfirmDialog({ message, onConfirm, onCancel }) {
+  return (
+    <Modal title="تأكيد الحذف" onClose={onCancel}>
+      <p className="text-center py-2 opacity-80">{message}</p>
+      <div className="flex gap-3 mt-4">
+        <button onClick={onCancel} className="flex-1 py-3 rounded-2xl border border-current/20 font-semibold">إلغاء</button>
+        <button onClick={onConfirm} className="flex-1 py-3 rounded-2xl bg-red-500 text-white font-bold">حذف</button>
+      </div>
+    </Modal>
+  );
+}
+
+// ─── Dashboard Page ───────────────────────────────────────────────────────
+function Dashboard({ orders }) {
+  const today = todayStr();
+  const todayOrders = orders.filter((o) => isSameDay(o.date, today));
+  const todayPaid = todayOrders.filter((o) => o.paid);
+  const todayUnpaid = todayOrders.filter((o) => !o.paid);
+  const todayRevenue = todayPaid.reduce((s, o) => s + o.price, 0);
+  const todayUnpaidAmt = todayUnpaid.reduce((s, o) => s + o.price, 0);
+
+  const stats = [
+    { label: "إيرادات اليوم", value: fmt(todayRevenue), icon: "💰", color: "from-amber-500/20 to-amber-600/5" },
+    { label: "طلبات اليوم", value: todayOrders.length, icon: "☕", color: "from-blue-500/20 to-blue-600/5" },
+    { label: "مدفوعة", value: todayPaid.length, icon: "✅", color: "from-emerald-500/20 to-emerald-600/5" },
+    { label: "غير مدفوعة", value: todayUnpaid.length, icon: "⏳", color: "from-red-500/20 to-red-600/5" },
+  ];
+
+  // Last 7 days chart
+  const last7 = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (6 - i));
+    const ds = d.toISOString().slice(0, 10);
+    const dayOrders = orders.filter((o) => isSameDay(o.date, ds) && o.paid);
+    return {
+      label: d.toLocaleDateString("ar-MA", { weekday: "short" }),
+      value: dayOrders.reduce((s, o) => s + o.price, 0),
+    };
+  });
+
+  const totalUnpaid = orders.filter((o) => !o.paid).reduce((s, o) => s + o.price, 0);
+  const totalPaid = orders.filter((o) => o.paid).reduce((s, o) => s + o.price, 0);
+
+  return (
+    <div className="p-4 space-y-5">
+      <div className="flex items-center gap-3 mb-2">
+        <div className="w-10 h-10 rounded-2xl bg-amber-500/20 flex items-center justify-center text-xl">☕</div>
+        <div>
+          <h1 className="text-xl font-black">لوحة التحكم</h1>
+          <p className="text-xs opacity-50">{new Date().toLocaleDateString("ar-MA", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {stats.map((s, i) => (
+          <div key={i} className={`stat-card rounded-2xl p-4 bg-gradient-to-br ${s.color}`}>
+            <div className="text-2xl mb-1">{s.icon}</div>
+            <div className="text-xl font-black leading-tight">{s.value}</div>
+            <div className="text-xs opacity-60 mt-0.5">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card rounded-2xl p-4">
+        <h3 className="font-bold mb-3 opacity-70 text-sm">إيرادات آخر 7 أيام</h3>
+        <BarChart data={last7} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="card rounded-2xl p-4 text-center">
+          <div className="text-xs opacity-50 mb-1">إجمالي المدفوع</div>
+          <div className="text-base font-black text-emerald-400">{fmt(totalPaid)}</div>
+        </div>
+        <div className="card rounded-2xl p-4 text-center">
+          <div className="text-xs opacity-50 mb-1">إجمالي غير المدفوع</div>
+          <div className="text-base font-black text-red-400">{fmt(totalUnpaid)}</div>
+        </div>
+      </div>
+
+      {todayUnpaid.length > 0 && (
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
+          <p className="text-sm font-bold text-amber-400 mb-1">⚠️ طلبات غير مدفوعة اليوم</p>
+          {todayUnpaid.slice(0, 3).map((o) => (
+            <p key={o.id} className="text-xs opacity-70 truncate">{o.customerName} — {fmt(o.price)}</p>
+          ))}
+          {todayUnpaid.length > 3 && <p className="text-xs opacity-50 mt-1">و {todayUnpaid.length - 3} طلبات أخرى...</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Orders Page ──────────────────────────────────────────────────────────
+function OrdersPage({ orders, onEdit, onDelete, onTogglePaid, dark }) {
+  const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState("all"); // all | paid | unpaid
+  const [dateFilter, setDateFilter] = useState("");
+  const [tab, setTab] = useState("all");
+
+  const filtered = useMemo(() => {
+    let list = [...orders].sort((a, b) => b.date.localeCompare(a.date));
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter((o) => o.customerName.toLowerCase().includes(q) || o.description.toLowerCase().includes(q));
+    }
+    if (dateFilter) list = list.filter((o) => isSameDay(o.date, dateFilter));
+    if (tab === "paid") list = list.filter((o) => o.paid);
+    if (tab === "unpaid") list = list.filter((o) => !o.paid);
+    return list;
+  }, [orders, search, dateFilter, tab]);
+
+  const paidTotal = filtered.filter((o) => o.paid).reduce((s, o) => s + o.price, 0);
+  const unpaidTotal = filtered.filter((o) => !o.paid).reduce((s, o) => s + o.price, 0);
+
+  return (
+    <div className="p-4 space-y-4">
+      <div className="relative">
+        <span className="absolute right-3 top-1/2 -translate-y-1/2 opacity-40"><Icon.Search /></span>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="بحث باسم الزبون أو الطلب..."
+          className="input-field w-full pr-10"
+        />
+      </div>
+      <div className="flex gap-2">
+        <input
+          type="date"
+          value={dateFilter}
+          onChange={(e) => setDateFilter(e.target.value)}
+          className="input-field flex-1 text-sm"
+        />
+        {dateFilter && (
+          <button onClick={() => setDateFilter("")} className="px-3 rounded-xl border border-current/20 text-sm">✕</button>
+        )}
+      </div>
+      <div className="flex rounded-2xl overflow-hidden border border-current/10">
+        {[["all", "الكل"], ["unpaid", "غير مدفوع"], ["paid", "مدفوع"]].map(([v, l]) => (
+          <button
+            key={v}
+            onClick={() => setTab(v)}
+            className={`flex-1 py-2.5 text-sm font-bold transition-all ${tab === v ? "btn-primary" : "opacity-50"}`}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-3 text-xs">
+        <span className="flex-1 card rounded-xl px-3 py-2 text-center"><span className="font-bold text-emerald-400">{fmt(paidTotal)}</span><br /><span className="opacity-50">مدفوع</span></span>
+        <span className="flex-1 card rounded-xl px-3 py-2 text-center"><span className="font-bold text-red-400">{fmt(unpaidTotal)}</span><br /><span className="opacity-50">غير مدفوع</span></span>
+      </div>
+      {filtered.length === 0 ? (
+        <div className="text-center py-16 opacity-30">
+          <div className="text-5xl mb-3">☕</div>
+          <p className="font-semibold">لا توجد طلبات</p>
+        </div>
+      ) : (
+        <div>{filtered.map((o) => <OrderCard key={o.id} order={o} onEdit={onEdit} onDelete={onDelete} onTogglePaid={onTogglePaid} dark={dark} />)}</div>
+      )}
+    </div>
+  );
+}
+
+// ─── Calendar Page ────────────────────────────────────────────────────────
+function CalendarPage({ orders }) {
+  const [current, setCurrent] = useState(new Date());
+  const [selected, setSelected] = useState(todayStr());
+
+  const year = current.getFullYear();
+  const month = current.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const dayRevMap = useMemo(() => {
+    const map = {};
+    orders.forEach((o) => {
+      const d = o.date?.slice(0, 10);
+      if (!d) return;
+      if (!map[d]) map[d] = { total: 0, paid: 0, unpaid: 0, count: 0 };
+      map[d].count++;
+      if (o.paid) map[d].paid += o.price;
+      else map[d].unpaid += o.price;
+      map[d].total += o.price;
+    });
+    return map;
+  }, [orders]);
+
+  const selStr = selected;
+  const selData = dayRevMap[selStr] || { total: 0, paid: 0, unpaid: 0, count: 0 };
+  const selOrders = orders.filter((o) => isSameDay(o.date, selStr)).sort((a, b) => b.date.localeCompare(a.date));
+
+  const monthNames = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليوز","غشت","شتنبر","أكتوبر","نونبر","دجنبر"];
+  const dayNames = ["أح","اث","ث","أر","خ","ج","س"];
+
+  return (
+    <div className="p-4 space-y-4">
+      <div className="card rounded-2xl p-4">
+        <div className="flex items-center justify-between mb-4">
+          <button onClick={() => setCurrent(new Date(year, month - 1))} className="p-2 rounded-xl opacity-60 hover:opacity-100">‹</button>
+          <span className="font-bold">{monthNames[month]} {year}</span>
+          <button onClick={() => setCurrent(new Date(year, month + 1))} className="p-2 rounded-xl opacity-60 hover:opacity-100">›</button>
+        </div>
+        <div className="grid grid-cols-7 gap-1 mb-2">
+          {dayNames.map((d) => <div key={d} className="text-center text-xs opacity-40 font-semibold py-1">{d}</div>)}
+        </div>
+        <div className="grid grid-cols-7 gap-1">
+          {Array.from({ length: firstDay }).map((_, i) => <div key={`e${i}`} />)}
+          {Array.from({ length: daysInMonth }, (_, i) => i + 1).map((day) => {
+            const ds = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+            const hasData = dayRevMap[ds];
+            const isSelected = ds === selStr;
+            const isToday = ds === todayStr();
+            return (
+              <button
+                key={day}
+                onClick={() => setSelected(ds)}
+                className={`relative aspect-square rounded-xl flex flex-col items-center justify-center text-sm font-semibold transition-all
+                  ${isSelected ? "btn-primary" : isToday ? "border-2 border-amber-500/50" : "hover:bg-current/10"}
+                `}
+              >
+                {day}
+                {hasData && !isSelected && (
+                  <div className="absolute bottom-1 w-1 h-1 rounded-full bg-amber-400" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2">
+        <div className="card rounded-xl p-3 text-center"><div className="text-sm font-black text-amber-400">{selData.count}</div><div className="text-xs opacity-50">طلبات</div></div>
+        <div className="card rounded-xl p-3 text-center"><div className="text-xs font-black text-emerald-400">{fmt(selData.paid)}</div><div className="text-xs opacity-50">مدفوع</div></div>
+        <div className="card rounded-xl p-3 text-center"><div className="text-xs font-black text-red-400">{fmt(selData.unpaid)}</div><div className="text-xs opacity-50">غير مدفوع</div></div>
+      </div>
+
+      {selOrders.length === 0 ? (
+        <div className="text-center py-10 opacity-30"><p className="text-sm">لا توجد طلبات في هذا اليوم</p></div>
+      ) : (
+        <div className="space-y-2">
+          <h3 className="font-bold text-sm opacity-60">طلبات {fmtDate(selStr)}</h3>
+          {selOrders.map((o) => (
+            <div key={o.id} className={`card rounded-xl p-3 flex items-center justify-between ${o.paid ? "border-r-2 border-emerald-500" : "border-r-2 border-amber-500"}`}>
+              <div>
+                <p className="font-bold text-sm">{o.customerName}</p>
+                {o.description && <p className="text-xs opacity-50 truncate">{o.description}</p>}
+              </div>
+              <div className="text-right">
+                <p className="font-black text-amber-400 text-sm">{fmt(o.price)}</p>
+                <p className="text-xs opacity-40">{fmtTime(o.date)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Statistics Page ──────────────────────────────────────────────────────
+function StatsPage({ orders }) {
+  const today = todayStr();
+  const ws = weekStart();
+  const ms = monthStart();
+  const ys = yearStart();
+
+  const revenue = (from, to) => orders
+    .filter((o) => o.paid && o.date >= from && o.date <= (to || "9999"))
+    .reduce((s, o) => s + o.price, 0);
+
+  const todayRev = revenue(today, today);
+  const weekRev = revenue(ws, today);
+  const monthRev = revenue(ms, today);
+  const yearRev = revenue(ys, today);
+  const totalRev = orders.filter((o) => o.paid).reduce((s, o) => s + o.price, 0);
+
+  // Last 12 months
+  const last12 = Array.from({ length: 12 }, (_, i) => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - (11 - i));
+    const mStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const val = orders.filter((o) => o.paid && o.date?.startsWith(mStr)).reduce((s, o) => s + o.price, 0);
+    const monthNames = ["ي","ف","م","أ","م","ي","ي","غ","ش","أ","ن","د"];
+    return { label: monthNames[d.getMonth()], value: val };
+  });
+
+  // Last 30 days
+  const last30 = Array.from({ length: 30 }, (_, i) => {
+    const d = new Date();
+    d.setDate(d.getDate() - (29 - i));
+    const ds = d.toISOString().slice(0, 10);
+    const val = orders.filter((o) => o.paid && isSameDay(o.date, ds)).reduce((s, o) => s + o.price, 0);
+    return { label: String(d.getDate()), value: val };
+  });
+
+  const bigStats = [
+    { label: "اليوم", value: fmt(todayRev), icon: "📅" },
+    { label: "هذا الأسبوع", value: fmt(weekRev), icon: "📆" },
+    { label: "هذا الشهر", value: fmt(monthRev), icon: "🗓" },
+    { label: "هذه السنة", value: fmt(yearRev), icon: "📊" },
+    { label: "إجمالي منذ البداية", value: fmt(totalRev), icon: "💎", big: true },
+  ];
+
+  return (
+    <div className="p-4 space-y-5">
+      <h1 className="text-xl font-black">الإحصائيات</h1>
+      <div className="space-y-3">
+        {bigStats.map((s, i) => (
+          <div key={i} className={`card rounded-2xl p-4 flex items-center justify-between ${s.big ? "border border-amber-500/30 bg-amber-500/5" : ""}`}>
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">{s.icon}</span>
+              <span className={`font-semibold ${s.big ? "" : "opacity-70"}`}>{s.label}</span>
+            </div>
+            <span className={`font-black ${s.big ? "text-amber-400 text-lg" : "text-base"}`}>{s.value}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="card rounded-2xl p-4">
+        <h3 className="font-bold mb-3 text-sm opacity-70">إيرادات آخر 12 شهراً</h3>
+        <BarChart data={last12} />
+      </div>
+
+      <div className="card rounded-2xl p-4">
+        <h3 className="font-bold mb-3 text-sm opacity-70">إيرادات آخر 30 يوماً</h3>
+        <BarChart data={last30} color="#10b981" />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="card rounded-2xl p-4 text-center">
+          <div className="text-2xl font-black text-emerald-400">{orders.filter((o) => o.paid).length}</div>
+          <div className="text-xs opacity-50 mt-1">إجمالي الطلبات المدفوعة</div>
+        </div>
+        <div className="card rounded-2xl p-4 text-center">
+          <div className="text-2xl font-black text-red-400">{orders.filter((o) => !o.paid).length}</div>
+          <div className="text-xs opacity-50 mt-1">إجمالي الطلبات غير المدفوعة</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Settings / Backup Page ───────────────────────────────────────────────
+function SettingsPage({ orders, onImport, dark, setDark }) {
+  const fileRef = useRef(null);
+
+  function handleExport() {
+    const data = JSON.stringify({ orders, exportedAt: new Date().toISOString() }, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `cafe-backup-${todayStr()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (parsed.orders && Array.isArray(parsed.orders)) {
+          onImport(parsed.orders);
+          alert("تم استيراد البيانات بنجاح ✓");
+        } else {
+          alert("ملف غير صالح");
+        }
+      } catch {
+        alert("خطأ في قراءة الملف");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  return (
+    <div className="p-4 space-y-5">
+      <h1 className="text-xl font-black">الإعدادات</h1>
+
+      <div className="card rounded-2xl p-4 space-y-4">
+        <h3 className="font-bold opacity-70 text-sm border-b border-current/10 pb-2">المظهر</h3>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {dark ? <Icon.Moon /> : <Icon.Sun />}
+            <span className="font-semibold">{dark ? "الوضع الليلي" : "الوضع النهاري"}</span>
+          </div>
+          <button
+            onClick={() => setDark(!dark)}
+            className={`w-14 h-7 rounded-full transition-all duration-300 relative ${dark ? "bg-amber-500" : "bg-gray-300"}`}
+          >
+            <div className={`w-5 h-5 rounded-full bg-white shadow absolute top-1 transition-all duration-300 ${dark ? "right-1" : "left-1"}`} />
+          </button>
+        </div>
+      </div>
+
+      <div className="card rounded-2xl p-4 space-y-3">
+        <h3 className="font-bold opacity-70 text-sm border-b border-current/10 pb-2">النسخ الاحتياطي</h3>
+        <button onClick={handleExport} className="flex items-center gap-3 w-full py-3.5 px-4 rounded-2xl btn-primary font-bold">
+          <Icon.Download />
+          <span>تصدير النسخة الاحتياطية</span>
+        </button>
+        <button onClick={() => fileRef.current?.click()} className="flex items-center gap-3 w-full py-3.5 px-4 rounded-2xl border border-current/20 font-bold hover:bg-current/5 transition-all">
+          <Icon.Upload />
+          <span>استيراد نسخة احتياطية</span>
+        </button>
+        <input ref={fileRef} type="file" accept=".json" onChange={handleImportFile} className="hidden" />
+      </div>
+
+      <div className="card rounded-2xl p-4 space-y-2">
+        <h3 className="font-bold opacity-70 text-sm border-b border-current/10 pb-2">معلومات</h3>
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between"><span className="opacity-60">إجمالي الطلبات</span><span className="font-bold">{orders.length}</span></div>
+          <div className="flex justify-between"><span className="opacity-60">إجمالي الإيرادات</span><span className="font-bold text-amber-400">{fmt(orders.filter(o=>o.paid).reduce((s,o)=>s+o.price,0))}</span></div>
+          <div className="flex justify-between"><span className="opacity-60">العملة</span><span className="font-bold">درهم مغربي (د.م.)</span></div>
+          <div className="flex justify-between"><span className="opacity-60">اللغة</span><span className="font-bold">العربية</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────
+export default function App() {
+  const [orders, setOrders] = useState([]);
+  const [page, setPage] = useState("home");
+  const [dark, setDark] = useState(true);
+  const [showForm, setShowForm] = useState(false);
+  const [editOrder, setEditOrder] = useState(null);
+  const [deleteOrder, setDeleteOrder] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+
+  // Load from IndexedDB
+  useEffect(() => {
+    dbGetAll().then((data) => {
+      setOrders(data.sort((a, b) => b.date?.localeCompare(a.date)));
+      setLoaded(true);
+    }).catch(() => setLoaded(true));
+  }, []);
+
+  const saveOrder = useCallback(async (order) => {
+    await dbPut(order);
+    setOrders((prev) => {
+      const idx = prev.findIndex((o) => o.id === order.id);
+      const next = idx >= 0 ? prev.map((o) => o.id === order.id ? order : o) : [order, ...prev];
+      return next.sort((a, b) => b.date?.localeCompare(a.date));
+    });
+  }, []);
+
+  function handleAddOrder({ customerName, description, price }) {
+    const order = { id: genId(), customerName, description, price, date: new Date().toISOString(), paid: false };
+    saveOrder(order);
+  }
+
+  function handleEditOrder({ customerName, description, price }) {
+    if (!editOrder) return;
+    const updated = { ...editOrder, customerName, description, price };
+    saveOrder(updated);
+    setEditOrder(null);
+  }
+
+  async function handleDelete() {
+    if (!deleteOrder) return;
+    await dbDelete(deleteOrder.id);
+    setOrders((prev) => prev.filter((o) => o.id !== deleteOrder.id));
+    setDeleteOrder(null);
+  }
+
+  async function handleTogglePaid(order) {
+    const updated = { ...order, paid: !order.paid };
+    await saveOrder(updated);
+  }
+
+  async function handleImport(importedOrders) {
+    await dbClear();
+    for (const o of importedOrders) await dbPut(o);
+    setOrders(importedOrders.sort((a, b) => b.date?.localeCompare(a.date)));
+  }
+
+  const navItems = [
+    { id: "home", label: "الرئيسية", icon: <Icon.Home /> },
+    { id: "orders", label: "الطلبات", icon: <Icon.List /> },
+    { id: "calendar", label: "التقويم", icon: <Icon.Calendar /> },
+    { id: "stats", label: "الإحصائيات", icon: <Icon.Chart /> },
+    { id: "settings", label: "الإعدادات", icon: <Icon.Coffee /> },
+  ];
+
+  if (!loaded) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center ${dark ? "bg-[#1A0F0A]" : "bg-[#FDF8F3]"}`}>
+        <div className="text-center">
+          <div className="text-5xl mb-4 animate-bounce">☕</div>
+          <div className="text-amber-400 font-bold">جاري التحميل...</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div dir="rtl" className={`app-root ${dark ? "dark" : "light"}`}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap');
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        .app-root {
+          font-family: 'Cairo', sans-serif;
+          min-height: 100dvh;
+          max-width: 480px;
+          margin: 0 auto;
+          display: flex;
+          flex-direction: column;
+          position: relative;
+        }
+
+        /* Dark Theme */
+        .dark { background: #1A0F0A; color: #E8D5B0; }
+        .dark .card { background: #2D1B0E; }
+        .dark .stat-card { background: #2D1B0E; }
+        .dark .order-card { background: #2D1B0E; }
+        .dark .modal-card { background: #2D1B0E; color: #E8D5B0; }
+        .dark .input-field { background: #3D2110; border: 1.5px solid #5a3520; color: #E8D5B0; }
+        .dark .input-field::placeholder { color: #8B6B52; }
+        .dark .bottom-nav { background: #1F1108; border-top: 1px solid #3D2110; }
+
+        /* Light Theme */
+        .light { background: #FDF8F3; color: #3D2314; }
+        .light .card { background: #fff; box-shadow: 0 2px 12px rgba(61,35,20,0.08); }
+        .light .stat-card { background: #fff; box-shadow: 0 2px 12px rgba(61,35,20,0.08); }
+        .light .order-card { background: #fff; box-shadow: 0 2px 12px rgba(61,35,20,0.08); }
+        .light .modal-card { background: #fff; color: #3D2314; }
+        .light .input-field { background: #F5EDE0; border: 1.5px solid #DBC8B4; color: #3D2314; }
+        .light .input-field::placeholder { color: #B89880; }
+        .light .bottom-nav { background: #fff; border-top: 1px solid #EDE0D4; }
+
+        .input-field {
+          padding: 12px 14px;
+          border-radius: 14px;
+          font-family: 'Cairo', sans-serif;
+          font-size: 15px;
+          outline: none;
+          transition: border-color 0.2s;
+          width: 100%;
+        }
+        .input-field:focus { border-color: #C8A97E !important; }
+
+        .btn-primary {
+          background: linear-gradient(135deg, #C8A97E, #A07B4E);
+          color: #1A0F0A;
+          border: none;
+          cursor: pointer;
+          transition: opacity 0.2s, transform 0.1s;
+          font-family: 'Cairo', sans-serif;
+        }
+        .btn-primary:active { transform: scale(0.97); opacity: 0.85; }
+
+        .action-btn {
+          width: 34px; height: 34px;
+          border-radius: 10px;
+          display: flex; align-items: center; justify-content: center;
+          border: none; cursor: pointer;
+          transition: all 0.2s;
+          font-family: 'Cairo', sans-serif;
+        }
+        .btn-pay { background: rgba(16,185,129,0.15); color: #10b981; }
+        .btn-pay:active { background: rgba(16,185,129,0.3); }
+        .btn-unpay { background: rgba(245,158,11,0.15); color: #f59e0b; }
+        .btn-edit { background: rgba(59,130,246,0.15); color: #60a5fa; }
+        .btn-del { background: rgba(239,68,68,0.15); color: #ef4444; }
+
+        .paid-card { border-right: 3px solid #10b981; }
+        .unpaid-card { border-right: 3px solid #f59e0b; }
+
+        .bottom-nav {
+          position: fixed;
+          bottom: 0;
+          left: 50%;
+          transform: translateX(-50%);
+          width: 100%;
+          max-width: 480px;
+          display: flex;
+          z-index: 40;
+          padding-bottom: env(safe-area-inset-bottom, 0);
+        }
+
+        .nav-btn {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          padding: 10px 4px 6px;
+          border: none;
+          background: transparent;
+          cursor: pointer;
+          color: inherit;
+          opacity: 0.4;
+          font-family: 'Cairo', sans-serif;
+          font-size: 10px;
+          font-weight: 700;
+          gap: 2px;
+          transition: opacity 0.2s;
+        }
+        .nav-btn.active { opacity: 1; color: #C8A97E; }
+
+        .fab {
+          position: fixed;
+          bottom: 76px;
+          left: 50%;
+          transform: translateX(-50%);
+          margin-left: calc(480px/2 - 72px);
+          z-index: 45;
+          width: 56px; height: 56px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, #C8A97E, #A07B4E);
+          color: #1A0F0A;
+          border: none;
+          cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+          box-shadow: 0 8px 24px rgba(200,169,126,0.4);
+          transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .fab:active { transform: translateX(-50%) scale(0.92); }
+
+        @media (max-width: 480px) {
+          .fab { left: auto; right: 20px; transform: none; margin-left: 0; }
+          .fab:active { transform: scale(0.92); }
+        }
+
+        .page-content {
+          flex: 1;
+          overflow-y: auto;
+          padding-bottom: 90px;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        @keyframes slideUp {
+          from { transform: translateY(100%); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-slideUp { animation: slideUp 0.3s cubic-bezier(0.32,0.72,0,1); }
+
+        button { font-family: 'Cairo', sans-serif; }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(200,169,126,0.3); border-radius: 2px; }
+
+        /* Coffee ring watermark */
+        .app-root::before {
+          content: '';
+          position: fixed;
+          top: -80px; right: -80px;
+          width: 300px; height: 300px;
+          border-radius: 50%;
+          border: 40px solid currentColor;
+          opacity: 0.02;
+          pointer-events: none;
+          z-index: 0;
+        }
+      `}</style>
+
+      <div className="page-content">
+        {page === "home" && <Dashboard orders={orders} />}
+        {page === "orders" && (
+          <OrdersPage
+            orders={orders}
+            onEdit={setEditOrder}
+            onDelete={setDeleteOrder}
+            onTogglePaid={handleTogglePaid}
+            dark={dark}
+          />
+        )}
+        {page === "calendar" && <CalendarPage orders={orders} />}
+        {page === "stats" && <StatsPage orders={orders} />}
+        {page === "settings" && <SettingsPage orders={orders} onImport={handleImport} dark={dark} setDark={setDark} />}
+      </div>
+
+      {/* FAB */}
+      <button className="fab" onClick={() => setShowForm(true)} title="طلب جديد">
+        <Icon.Plus />
+      </button>
+
+      {/* Bottom Nav */}
+      <nav className="bottom-nav">
+        {navItems.map((n) => (
+          <button key={n.id} className={`nav-btn ${page === n.id ? "active" : ""}`} onClick={() => setPage(n.id)}>
+            {n.icon}
+            <span>{n.label}</span>
+          </button>
+        ))}
+      </nav>
+
+      {/* Add Order Modal */}
+      {showForm && (
+        <Modal title="طلب جديد ☕" onClose={() => setShowForm(false)}>
+          <OrderForm onSave={handleAddOrder} onClose={() => setShowForm(false)} />
+        </Modal>
+      )}
+
+      {/* Edit Order Modal */}
+      {editOrder && (
+        <Modal title="تعديل الطلب" onClose={() => setEditOrder(null)}>
+          <OrderForm initial={editOrder} onSave={handleEditOrder} onClose={() => setEditOrder(null)} />
+        </Modal>
+      )}
+
+      {/* Delete Confirm */}
+      {deleteOrder && (
+        <ConfirmDialog
+          message={`هل تريد حذف طلب "${deleteOrder.customerName}"؟ لا يمكن التراجع عن هذا الإجراء.`}
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteOrder(null)}
+        />
+      )}
+    </div>
+  );
+}
